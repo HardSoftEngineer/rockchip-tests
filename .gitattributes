@@ -1,0 +1,33 @@
+# force LF
+* text eol=lf
+*.py text eol=lf
+
+# binary
+*.jar binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ttf binary
+*.ico binary
+*.npz binary
+*.whl binary
+*.a binary
+*.a.* binary
+*.so binary
+*.so.* binary
+*.cmd binary
+*.RECORD binary
+*.pyc binary
+*.python binary
+*.python3 binary
+*.python3.8 binary
+RECORD binary
+python binary
+python3 binary
+python3.8 binary
+*.engine binary
+
+# 
+*.a binary
+*.so binary
+*.rknn binary
