@@ -16,11 +16,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <chrono>
 
 #include "yolov8.h"
 #include "common.h"
 #include "file_utils.h"
 #include "image_utils.h"
+
+using clk = std::chrono::steady_clock;
+using ms  = std::chrono::duration<double, std::milli>;
 
 static void dump_tensor_attr(rknn_tensor_attr *attr)
 {
@@ -38,7 +42,6 @@ int init_yolov8_model(const char *model_path, rknn_app_context_t *app_ctx)
     char *model;
     rknn_context ctx = 0;
 
-    // Load RKNN Model
     model_len = read_data_from_file(model_path, &model);
     if (model == NULL)
     {
@@ -54,7 +57,6 @@ int init_yolov8_model(const char *model_path, rknn_app_context_t *app_ctx)
         return -1;
     }
 
-    // Get Model Input Output Number
     rknn_input_output_num io_num;
     ret = rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
     if (ret != RKNN_SUCC)
@@ -64,7 +66,6 @@ int init_yolov8_model(const char *model_path, rknn_app_context_t *app_ctx)
     }
     printf("model input num: %d, output num: %d\n", io_num.n_input, io_num.n_output);
 
-    // Get Model Input Info
     printf("input tensors:\n");
     rknn_tensor_attr input_attrs[io_num.n_input];
     memset(input_attrs, 0, sizeof(input_attrs));
@@ -80,7 +81,6 @@ int init_yolov8_model(const char *model_path, rknn_app_context_t *app_ctx)
         dump_tensor_attr(&(input_attrs[i]));
     }
 
-    // Get Model Output Info
     printf("output tensors:\n");
     rknn_tensor_attr output_attrs[io_num.n_output];
     memset(output_attrs, 0, sizeof(output_attrs));
@@ -96,37 +96,32 @@ int init_yolov8_model(const char *model_path, rknn_app_context_t *app_ctx)
         dump_tensor_attr(&(output_attrs[i]));
     }
 
-    // Set to context
     app_ctx->rknn_ctx = ctx;
 
-    // TODO
-    if (output_attrs[0].qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC && output_attrs[0].type == RKNN_TENSOR_INT8)
-    {
+    if (output_attrs[0].qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC &&
+        output_attrs[0].type == RKNN_TENSOR_INT8)
         app_ctx->is_quant = true;
-    }
     else
-    {
         app_ctx->is_quant = false;
-    }
 
     app_ctx->io_num = io_num;
-    app_ctx->input_attrs = (rknn_tensor_attr *)malloc(io_num.n_input * sizeof(rknn_tensor_attr));
-    memcpy(app_ctx->input_attrs, input_attrs, io_num.n_input * sizeof(rknn_tensor_attr));
+    app_ctx->input_attrs  = (rknn_tensor_attr *)malloc(io_num.n_input  * sizeof(rknn_tensor_attr));
     app_ctx->output_attrs = (rknn_tensor_attr *)malloc(io_num.n_output * sizeof(rknn_tensor_attr));
+    memcpy(app_ctx->input_attrs,  input_attrs,  io_num.n_input  * sizeof(rknn_tensor_attr));
     memcpy(app_ctx->output_attrs, output_attrs, io_num.n_output * sizeof(rknn_tensor_attr));
 
     if (input_attrs[0].fmt == RKNN_TENSOR_NCHW)
     {
         printf("model is NCHW input fmt\n");
         app_ctx->model_channel = input_attrs[0].dims[1];
-        app_ctx->model_height = input_attrs[0].dims[2];
-        app_ctx->model_width = input_attrs[0].dims[3];
+        app_ctx->model_height  = input_attrs[0].dims[2];
+        app_ctx->model_width   = input_attrs[0].dims[3];
     }
     else
     {
         printf("model is NHWC input fmt\n");
-        app_ctx->model_height = input_attrs[0].dims[1];
-        app_ctx->model_width = input_attrs[0].dims[2];
+        app_ctx->model_height  = input_attrs[0].dims[1];
+        app_ctx->model_width   = input_attrs[0].dims[2];
         app_ctx->model_channel = input_attrs[0].dims[3];
     }
     printf("model input height=%d, width=%d, channel=%d\n",
@@ -137,16 +132,8 @@ int init_yolov8_model(const char *model_path, rknn_app_context_t *app_ctx)
 
 int release_yolov8_model(rknn_app_context_t *app_ctx)
 {
-    if (app_ctx->input_attrs != NULL)
-    {
-        free(app_ctx->input_attrs);
-        app_ctx->input_attrs = NULL;
-    }
-    if (app_ctx->output_attrs != NULL)
-    {
-        free(app_ctx->output_attrs);
-        app_ctx->output_attrs = NULL;
-    }
+    if (app_ctx->input_attrs != NULL)  { free(app_ctx->input_attrs);  app_ctx->input_attrs  = NULL; }
+    if (app_ctx->output_attrs != NULL) { free(app_ctx->output_attrs); app_ctx->output_attrs = NULL; }
     if (app_ctx->rknn_ctx != 0)
     {
         rknn_destroy(app_ctx->rknn_ctx);
@@ -155,33 +142,40 @@ int release_yolov8_model(rknn_app_context_t *app_ctx)
     return 0;
 }
 
-int inference_yolov8_model(rknn_app_context_t *app_ctx, image_buffer_t *img, object_detect_result_list *od_results)
+int inference_yolov8_model(rknn_app_context_t *app_ctx,
+                           image_buffer_t     *img,
+                           object_detect_result_list *od_results,
+                           infer_timing_t     *timing)
 {
-    int ret;
+    int ret = 0;
     image_buffer_t dst_img;
-    letterbox_t letter_box;
-    rknn_input inputs[app_ctx->io_num.n_input];
-    rknn_output outputs[app_ctx->io_num.n_output];
-    const float nms_threshold = NMS_THRESH;      // 默认的NMS阈值
-    const float box_conf_threshold = BOX_THRESH; // 默认的置信度阈值
-    int bg_color = 114;
+    letterbox_t    letter_box;
+    rknn_input     inputs[app_ctx->io_num.n_input];
+    rknn_output    outputs[app_ctx->io_num.n_output];
+    const float nms_threshold      = NMS_THRESH;
+    const float box_conf_threshold = BOX_THRESH;
+    const int   bg_color           = 114;
 
-    if ((!app_ctx) || !(img) || (!od_results))
-    {
-        return -1;
-    }
+    if (!app_ctx || !img || !od_results) return -1;
 
     memset(od_results, 0x00, sizeof(*od_results));
     memset(&letter_box, 0, sizeof(letterbox_t));
-    memset(&dst_img, 0, sizeof(image_buffer_t));
-    memset(inputs, 0, sizeof(inputs));
-    memset(outputs, 0, sizeof(outputs));
+    memset(&dst_img,    0, sizeof(image_buffer_t));
+    memset(inputs,      0, sizeof(inputs));
+    memset(outputs,     0, sizeof(outputs));
 
-    // Pre Process
-    dst_img.width = app_ctx->model_width;
-    dst_img.height = app_ctx->model_height;
-    dst_img.format = IMAGE_FORMAT_RGB888;
-    dst_img.size = get_image_size(&dst_img);
+    // ---------------------------------------------------------------
+    // Фаза PRE: letterbox + rknn_inputs_set
+    // Блок {} нужен потому что ниже есть goto out, а в C++ нельзя
+    // перепрыгнуть через инициализацию переменных с конструкторами.
+    // t0/t1/t2/t3 имеют нетривиальный конструктор (chrono::time_point).
+    // ---------------------------------------------------------------
+    auto t0 = clk::now();
+
+    dst_img.width    = app_ctx->model_width;
+    dst_img.height   = app_ctx->model_height;
+    dst_img.format   = IMAGE_FORMAT_RGB888;
+    dst_img.size     = get_image_size(&dst_img);
     dst_img.virt_addr = (unsigned char *)malloc(dst_img.size);
     if (dst_img.virt_addr == NULL)
     {
@@ -189,62 +183,77 @@ int inference_yolov8_model(rknn_app_context_t *app_ctx, image_buffer_t *img, obj
         return -1;
     }
 
-    // letterbox
     ret = convert_image_with_letterbox(img, &dst_img, &letter_box, bg_color);
     if (ret < 0)
     {
         printf("convert_image_with_letterbox fail! ret=%d\n", ret);
-        return -1;
+        goto out;
     }
 
-    // Set Input Data
     inputs[0].index = 0;
-    inputs[0].type = RKNN_TENSOR_UINT8;
-    inputs[0].fmt = RKNN_TENSOR_NHWC;
-    inputs[0].size = app_ctx->model_width * app_ctx->model_height * app_ctx->model_channel;
-    inputs[0].buf = dst_img.virt_addr;
+    inputs[0].type  = RKNN_TENSOR_UINT8;
+    inputs[0].fmt   = RKNN_TENSOR_NHWC;
+    inputs[0].size  = app_ctx->model_width * app_ctx->model_height * app_ctx->model_channel;
+    inputs[0].buf   = dst_img.virt_addr;
 
     ret = rknn_inputs_set(app_ctx->rknn_ctx, app_ctx->io_num.n_input, inputs);
     if (ret < 0)
     {
         printf("rknn_input_set fail! ret=%d\n", ret);
-        return -1;
-    }
-
-    // Run
-    // printf("rknn_run\n");
-    ret = rknn_run(app_ctx->rknn_ctx, nullptr);
-    if (ret < 0)
-    {
-        printf("rknn_run fail! ret=%d\n", ret);
-        return -1;
-    }
-
-    // Get Output
-    memset(outputs, 0, sizeof(outputs));
-    for (int i = 0; i < app_ctx->io_num.n_output; i++)
-    {
-        outputs[i].index = i;
-        outputs[i].want_float = (!app_ctx->is_quant);
-    }
-    ret = rknn_outputs_get(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs, NULL);
-    if (ret < 0)
-    {
-        printf("rknn_outputs_get fail! ret=%d\n", ret);
         goto out;
     }
 
-    // Post Process
-    post_process(app_ctx, outputs, &letter_box, box_conf_threshold, nms_threshold, od_results);
+    {
+        // Здесь объявляем t1..t3 внутри блока — теперь goto out выше
+        // не перепрыгивает через их инициализацию, он прыгает ДО блока.
+        auto t1 = clk::now();   // конец PRE
 
-    // Remeber to release rknn output
-    rknn_outputs_release(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs);
+        // ---------------------------------------------------------------
+        // Фаза NPU: rknn_run + rknn_outputs_get
+        // ---------------------------------------------------------------
+        ret = rknn_run(app_ctx->rknn_ctx, nullptr);
+        if (ret < 0)
+        {
+            printf("rknn_run fail! ret=%d\n", ret);
+            goto out;  // goto внутри блока — t1 уже инициализирован, всё ок
+        }
+
+        memset(outputs, 0, sizeof(outputs));
+        for (int i = 0; i < app_ctx->io_num.n_output; i++)
+        {
+            outputs[i].index      = i;
+            outputs[i].want_float = (!app_ctx->is_quant);
+        }
+        ret = rknn_outputs_get(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs, NULL);
+        if (ret < 0)
+        {
+            printf("rknn_outputs_get fail! ret=%d\n", ret);
+            goto out;
+        }
+
+        auto t2 = clk::now();   // конец NPU
+
+        // ---------------------------------------------------------------
+        // Фаза POST: DFL + NMS
+        // ---------------------------------------------------------------
+        post_process(app_ctx, outputs, &letter_box,
+                     box_conf_threshold, nms_threshold, od_results);
+
+        rknn_outputs_release(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs);
+
+        auto t3 = clk::now();   // конец POST
+
+        if (timing)
+        {
+            timing->pre_ms  = ms(t1 - t0).count();
+            timing->npu_ms  = ms(t2 - t1).count();
+            timing->post_ms = ms(t3 - t2).count();
+        }
+    }   // конец внутреннего блока
 
 out:
     if (dst_img.virt_addr != NULL)
-    {
         free(dst_img.virt_addr);
-    }
 
     return ret;
 }
